@@ -247,8 +247,16 @@
     }
 
     function getCursorPosition() {
-      if (state.useCamera && state.handPoint) return state.handPoint;
+      if (state.handPoint) return state.handPoint;
       return state.pointer;
+    }
+
+    function mapHandPointToCanvas(landmark) {
+      if (!landmark) return null;
+      return {
+        x: (1 - landmark.x) * canvas.width,
+        y: landmark.y * canvas.height
+      };
     }
 
     function spawnFruit() {
@@ -670,16 +678,17 @@
         return;
       }
 
-      const nextPoint = {
-        x: tip.x * canvas.width,
-        y: tip.y * canvas.height
-      };
+      const mappedPoint = mapHandPointToCanvas(tip);
+      if (!mappedPoint) {
+        state.handPoint = null;
+        return;
+      }
 
       if (!state.handPoint) {
-        state.handPoint = { ...nextPoint };
+        state.handPoint = { ...mappedPoint };
       } else {
-        state.handPoint.x = lerp(state.handPoint.x, nextPoint.x, 0.42);
-        state.handPoint.y = lerp(state.handPoint.y, nextPoint.y, 0.42);
+        state.handPoint.x = lerp(state.handPoint.x, mappedPoint.x, 0.42);
+        state.handPoint.y = lerp(state.handPoint.y, mappedPoint.y, 0.42);
       }
 
       const last = state.handTrail[state.handTrail.length - 1];
@@ -689,33 +698,22 @@
       }
     }
 
-    function createDetectionCanvas() {
-      if (!state.detectionCanvas) {
-        state.detectionCanvas = document.createElement("canvas");
-        state.detectionCanvas.width = state.detectionWidth;
-        state.detectionCanvas.height = state.detectionHeight;
-        state.detectionCtx = state.detectionCanvas.getContext("2d");
-      }
-    }
-
     async function setupCameraTracking() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         console.warn('Camera API not available.');
         return false;
       }
 
-      if (typeof window.Hands === "undefined") {
-        console.warn('MediaPipe Hands is not loaded.');
+      if (typeof window.Hands === "undefined" || typeof window.Camera === "undefined") {
+        console.warn('MediaPipe Hands/Camera is not loaded.');
         return false;
       }
 
       try {
-        createDetectionCanvas();
-
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
+            width: { ideal: state.detectionWidth },
+            height: { ideal: state.detectionHeight },
             facingMode: 'user'
           },
           audio: false
@@ -724,11 +722,9 @@
         webcam.srcObject = stream;
         state.webcamStream = stream;
         webcam.style.display = 'block';
-        webcam.width = 1280;
-        webcam.height = 720;
+        webcam.width = state.detectionWidth;
+        webcam.height = state.detectionHeight;
         await webcam.play();
-
-        state.useCamera = true;
 
         const hands = new window.Hands({
           locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
@@ -744,24 +740,22 @@
         hands.onResults(onHandResults);
         state.handsInstance = hands;
 
-        const detectLoop = async () => {
-          if (!state.useCamera || !state.webcamStream || webcam.readyState < 2) {
-            state.detectionLoopTimer = setTimeout(detectLoop, 1000 / 20);
-            return;
-          }
+        const camera = new window.Camera(webcam, {
+          onFrame: async () => {
+            const nowTime = performance.now();
+            if (nowTime - state.lastHandInference >= state.inferenceDelayMs) {
+              state.lastHandInference = nowTime;
+              await hands.send({ image: webcam });
+            }
+          },
+          width: state.detectionWidth,
+          height: state.detectionHeight,
+          facingMode: 'user'
+        });
 
-          try {
-            const ctx2d = state.detectionCtx;
-            ctx2d.clearRect(0, 0, state.detectionWidth, state.detectionHeight);
-            ctx2d.drawImage(webcam, 0, 0, state.detectionWidth, state.detectionHeight);
-          } catch (err) {
-            console.warn('Hand detection failed:', err);
-          }
-
-          state.detectionLoopTimer = setTimeout(detectLoop, 1000 / 20);
-        };
-
-        state.detectionLoopTimer = setTimeout(detectLoop, 50);
+        state.cameraInstance = camera;
+        state.useCamera = true;
+        await camera.start();
         return true;
       } catch (err) {
         console.warn('MediaPipe camera setup failed:', err);

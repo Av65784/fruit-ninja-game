@@ -753,13 +753,7 @@
           try {
             const ctx2d = state.detectionCtx;
             ctx2d.clearRect(0, 0, state.detectionWidth, state.detectionHeight);
-            ctx2d.save();
-            ctx2d.translate(state.detectionWidth, 0);
-            ctx2d.scale(-1, 1);
             ctx2d.drawImage(webcam, 0, 0, state.detectionWidth, state.detectionHeight);
-            ctx2d.restore();
-
-            await hands.send({ image: state.detectionCanvas });
           } catch (err) {
             console.warn('Hand detection failed:', err);
           }

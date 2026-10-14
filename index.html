@@ -185,13 +185,15 @@
       handsInstance: null,
       cameraInstance: null,
       useCamera: false,
-      handposeModel: null,
       webcamStream: null,
       lastHandInference: 0,
       aimTrailMaxPoints: 10,
       detectionWidth: 640,
       detectionHeight: 480,
-      inferenceDelayMs: 50
+      inferenceDelayMs: 50,
+      detectionCanvas: null,
+      detectionCtx: null,
+      detectionLoopTimer: null
     };
 
     const fruitPalette = [
@@ -245,7 +247,7 @@
     }
 
     function getCursorPosition() {
-      if (state.handPoint) return state.handPoint;
+      if (state.useCamera && state.handPoint) return state.handPoint;
       return state.pointer;
     }
 
@@ -656,127 +658,119 @@
       requestAnimationFrame(gameLoop);
     });
 
-    camBtn.addEventListener('click', async () => {
-      camBtn.disabled = true;
-      camBtn.textContent = 'Enabling...';
-      const ok = await setupCameraTracking();
-      if (!ok) {
-        camBtn.disabled = false;
-        camBtn.textContent = 'Enable Camera';
-        alert('Camera / Hands not available in this browser. Make sure you allow camera permissions and try a supported browser.');
+    function onHandResults(results) {
+      if (!results || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+        state.handPoint = null;
         return;
       }
-      camBtn.textContent = 'Camera On';
-      camBtn.style.opacity = '0.85';
-    });
 
-    function onHandResults(results) {
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const tip = results.multiHandLandmarks[0][8];
-        const nextPoint = {
-          x: tip.x * canvas.width,
-          y: tip.y * canvas.height
-        };
-
-        if (!state.handPoint) {
-          state.handPoint = { ...nextPoint };
-        } else {
-          state.handPoint.x = lerp(state.handPoint.x, nextPoint.x, 0.35);
-          state.handPoint.y = lerp(state.handPoint.y, nextPoint.y, 0.35);
-        }
-
-        const dist = state.handTrail.length > 0 ? Math.hypot(
-          state.handTrail[state.handTrail.length - 1].x - state.handPoint.x,
-          state.handTrail[state.handTrail.length - 1].y - state.handPoint.y
-        ) : Infinity;
-
-        if (dist > 3) pushHandTrailPoint(state.handPoint);
-      } else {
+      const tip = results.multiHandLandmarks[0][8];
+      if (!tip) {
         state.handPoint = null;
+        return;
+      }
+
+      const nextPoint = {
+        x: tip.x * canvas.width,
+        y: tip.y * canvas.height
+      };
+
+      if (!state.handPoint) {
+        state.handPoint = { ...nextPoint };
+      } else {
+        state.handPoint.x = lerp(state.handPoint.x, nextPoint.x, 0.42);
+        state.handPoint.y = lerp(state.handPoint.y, nextPoint.y, 0.42);
+      }
+
+      const last = state.handTrail[state.handTrail.length - 1];
+      const dist = last ? Math.hypot(last.x - state.handPoint.x, last.y - state.handPoint.y) : Infinity;
+      if (dist > 3) {
+        pushHandTrailPoint(state.handPoint);
       }
     }
 
-    function loadScript(src) {
-      return new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = src;
-        script.onload = () => resolve();
-        script.onerror = () => reject(new Error(`Failed to load ${src}`));
-        document.head.appendChild(script);
-      });
+    function createDetectionCanvas() {
+      if (!state.detectionCanvas) {
+        state.detectionCanvas = document.createElement("canvas");
+        state.detectionCanvas.width = state.detectionWidth;
+        state.detectionCanvas.height = state.detectionHeight;
+        state.detectionCtx = state.detectionCanvas.getContext("2d");
+      }
     }
 
-    async function setupTfFallback() {
+    async function setupCameraTracking() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.warn('Camera API not available.');
+        return false;
+      }
+
+      if (typeof window.Hands === "undefined") {
+        console.warn('MediaPipe Hands is not loaded.');
+        return false;
+      }
+
       try {
-        if (typeof window.tf === 'undefined') {
-          await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js');
-        }
-        if (typeof window.handpose === 'undefined') {
-          await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.0.7/dist/handpose.min.js');
-        }
+        createDetectionCanvas();
 
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            width: { ideal: state.detectionWidth },
-            height: { ideal: state.detectionHeight },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
             facingMode: 'user'
-          }
+          },
+          audio: false
         });
+
         webcam.srcObject = stream;
         state.webcamStream = stream;
         webcam.style.display = 'block';
-        webcam.width = state.detectionWidth;
-        webcam.height = state.detectionHeight;
+        webcam.width = 1280;
+        webcam.height = 720;
         await webcam.play();
 
-        state.handposeModel = await window.handpose.load();
         state.useCamera = true;
 
-        async function detectLoop() {
-          if (!state.useCamera || !state.handposeModel) return;
-          const nowTime = performance.now();
-          if (nowTime - state.lastHandInference < state.inferenceDelayMs) {
-            if (state.useCamera) requestAnimationFrame(detectLoop);
+        const hands = new window.Hands({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 0,
+          minDetectionConfidence: 0.6,
+          minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onHandResults);
+        state.handsInstance = hands;
+
+        const detectLoop = async () => {
+          if (!state.useCamera || !state.webcamStream || webcam.readyState < 2) {
+            state.detectionLoopTimer = setTimeout(detectLoop, 1000 / 20);
             return;
           }
-          state.lastHandInference = nowTime;
 
           try {
-            const predictions = await state.handposeModel.estimateHands(webcam, true);
-            if (predictions && predictions.length > 0 && predictions[0].landmarks) {
-              const tip = predictions[0].landmarks[8];
-              const nextPoint = {
-                x: (1 - tip[0] / webcam.videoWidth) * canvas.width,
-                y: (tip[1] / webcam.videoHeight) * canvas.height
-              };
+            const ctx2d = state.detectionCtx;
+            ctx2d.clearRect(0, 0, state.detectionWidth, state.detectionHeight);
+            ctx2d.save();
+            ctx2d.translate(state.detectionWidth, 0);
+            ctx2d.scale(-1, 1);
+            ctx2d.drawImage(webcam, 0, 0, state.detectionWidth, state.detectionHeight);
+            ctx2d.restore();
 
-              if (!state.handPoint) {
-                state.handPoint = { ...nextPoint };
-              } else {
-                state.handPoint.x = lerp(state.handPoint.x, nextPoint.x, 0.35);
-                state.handPoint.y = lerp(state.handPoint.y, nextPoint.y, 0.35);
-              }
-
-              const dist = state.handTrail.length > 0 ? Math.hypot(
-                state.handTrail[state.handTrail.length - 1].x - state.handPoint.x,
-                state.handTrail[state.handTrail.length - 1].y - state.handPoint.y
-              ) : Infinity;
-              if (dist > 3) pushHandTrailPoint(state.handPoint);
-            } else {
-              state.handPoint = null;
-            }
+            await hands.send({ image: state.detectionCanvas });
           } catch (err) {
-            console.warn('Hand tracking detect loop failed:', err);
-            state.handPoint = null;
+            console.warn('Hand detection failed:', err);
           }
 
-          if (state.useCamera) requestAnimationFrame(detectLoop);
-        }
+          state.detectionLoopTimer = setTimeout(detectLoop, 1000 / 20);
+        };
 
-        requestAnimationFrame(detectLoop);
+        state.detectionLoopTimer = setTimeout(detectLoop, 50);
         return true;
       } catch (err) {
-        console.warn('TF handpose fallback failed:', err);
+        console.warn('MediaPipe camera setup failed:', err);
         if (state.webcamStream) {
           state.webcamStream.getTracks().forEach(track => track.stop());
         }
@@ -785,49 +779,21 @@
       }
     }
 
-    async function setupCameraTracking() {
-      const hasHands = typeof window.Hands !== "undefined" && typeof window.Camera !== "undefined";
-      if (hasHands) {
-        webcam.style.display = "block";
-        try {
-          const hands = new window.Hands({
-            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-          });
+    camBtn.addEventListener('click', async () => {
+      camBtn.disabled = true;
+      camBtn.textContent = 'Enabling...';
 
-          hands.setOptions({
-            maxNumHands: 1,
-            modelComplexity: 0,
-            minDetectionConfidence: 0.6,
-            minTrackingConfidence: 0.5
-          });
-
-          hands.onResults(onHandResults);
-          state.handsInstance = hands;
-
-          const camera = new window.Camera(webcam, {
-            onFrame: async () => {
-              const nowTime = performance.now();
-              if (nowTime - state.lastHandInference >= state.inferenceDelayMs) {
-                state.lastHandInference = nowTime;
-                await hands.send({ image: webcam });
-              }
-            },
-            width: state.detectionWidth,
-            height: state.detectionHeight,
-            facingMode: "user"
-          });
-
-          state.cameraInstance = camera;
-          state.useCamera = true;
-          await camera.start();
-          return true;
-        } catch (err) {
-          console.warn('MediaPipe start failed:', err);
-        }
+      const ok = await setupCameraTracking();
+      if (!ok) {
+        camBtn.disabled = false;
+        camBtn.textContent = 'Enable Camera';
+        alert('Camera / MediaPipe Hands not available in this browser. Make sure camera permissions are allowed and try a supported browser.');
+        return;
       }
 
-      return await setupTfFallback();
-    }
+      camBtn.textContent = 'Camera On';
+      camBtn.style.opacity = '0.85';
+    });
 
     function draw() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);

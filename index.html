@@ -15,23 +15,18 @@
       color: white;
     }
 
-    /* make the canvas sit above the page but below the HUD/overlay */
     #game {
       display: block;
       width: 100vw;
       height: 100vh;
       cursor: none;
-      position: fixed;
-      top: 0;
-      left: 0;
-      z-index: 8;
     }
 
     #hud {
       position: fixed;
       top: 20px;
       left: 20px;
-      z-index: 12;
+      z-index: 10;
       font-size: 24px;
       font-weight: 700;
       letter-spacing: 1px;
@@ -121,27 +116,13 @@
       opacity: 0.9;
       border: 2px solid rgba(255,255,255,0.14);
       display: none;
-      z-index: 6; /* keep webcam beneath the canvas */
+      z-index: 15;
     }
 
     #camBtn {
       margin-left: 12px;
       background: linear-gradient(135deg, #00b894, #009977);
       box-shadow: 0 12px 24px rgba(0,185,148,0.15);
-    }
-
-    /* Spotlight overlay: blurs the page but keeps a clear circle around the pointer */
-    #spotlight {
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      z-index: 9; /* above canvas but below HUD */
-      display: none;
-      backdrop-filter: blur(6px);
-      -webkit-backdrop-filter: blur(6px);
-      /* mask creates a hole where the pointer is located. We update --x and --y from JS */
-      mask-image: radial-gradient(circle at var(--x, 50%) var(--y, 50%), transparent 0 90px, rgba(0,0,0,0.8) 140px);
-      -webkit-mask-image: radial-gradient(circle at var(--x, 50%) var(--y, 50%), transparent 0 90px, rgba(0,0,0,0.8) 140px);
     }
 
     @media (max-width: 640px) {
@@ -160,8 +141,6 @@
 
   <canvas id="game"></canvas>
   <video id="webcam" autoplay playsinline muted></video>
-  <!-- spotlight element to blur page but keep focus around finger -->
-  <div id="spotlight"></div>
 
   <div id="overlay">
     <div class="panel">
@@ -186,7 +165,6 @@
     const webcam = document.getElementById("webcam");
     const streakEl = document.getElementById("streak");
     const difficultyEl = document.getElementById("difficulty");
-    const spotlight = document.getElementById('spotlight');
 
     const state = {
       score: 0,
@@ -204,7 +182,10 @@
       streak: 0,
       difficulty: 'easy',
       handsInstance: null,
-      cameraInstance: null
+      cameraInstance: null,
+      useCamera: false,
+      handposeModel: null,
+      webcamStream: null
     };
 
     const fruitPalette = [
@@ -273,7 +254,6 @@
         missed: false
       });
 
-      // set next spawn using difficulty settings (measured in 'ticks' relative to the frame delta)
       state.spawnTimer = rand(settings.spawnMin, settings.spawnMax);
     }
 
@@ -320,7 +300,6 @@
       else state.difficulty = 'easy';
 
       if (prev !== state.difficulty) {
-        // small visual cue: briefly flash the difficulty text
         difficultyEl.textContent = state.difficulty.toUpperCase();
         difficultyEl.style.transition = 'transform 0.25s ease';
         difficultyEl.style.transform = 'scale(1.18)';
@@ -390,7 +369,6 @@
         if (fruit.y - fruit.radius > canvas.height) {
           state.misses += 1;
           state.score = Math.max(0, state.score - 1);
-          // reset streak when missing
           state.streak = 0;
           checkDifficulty();
           updateHud();
@@ -549,21 +527,6 @@
       ctx.stroke();
     }
 
-    // Main draw function (was missing) — draws the game frame
-    function draw() {
-      // clear
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // Draw fruits and pieces behind the trail/cursor
-      for (const fruit of state.fruits) drawFruit(fruit);
-      for (const s of state.slices) drawFruitSlice(s);
-      drawParticles();
-
-      // draw trail and cursor on top
-      drawTrail();
-      drawCursor();
-    }
-
     function gameLoop(ts) {
       if (!state.running) return;
 
@@ -586,13 +549,10 @@
     }
 
     function updatePointerFromMouse(e) {
+      if (state.useCamera) return;
       state.pointer.x = e.clientX;
       state.pointer.y = e.clientY;
       addTrailPoint(e.clientX, e.clientY);
-
-      // update spotlight position for mouse too (useful for testing on desktop)
-      spotlight.style.setProperty('--x', `${state.pointer.x}px`);
-      spotlight.style.setProperty('--y', `${state.pointer.y}px`);
     }
 
     window.addEventListener("pointermove", updatePointerFromMouse);
@@ -627,86 +587,135 @@
         alert('Camera / Hands not available in this browser. Make sure you allow camera permissions and try a supported browser.');
         return;
       }
-
       camBtn.textContent = 'Camera On';
       camBtn.style.opacity = '0.85';
-
-      // start the game automatically when camera is enabled (so fruits will spawn)
-      if (!state.running && !state.gameOver) {
-        state.running = true;
-        overlay.style.display = 'none';
-        state.spawnTimer = 0;
-        requestAnimationFrame(gameLoop);
-      }
     });
 
     function onHandResults(results) {
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const tip = results.multiHandLandmarks[0][8];
-        // Tip coordinates are normalized [0..1] relative to the input video.
-        // The video is mirrored on screen (scaleX(-1)), so flip X to match the canvas coordinates.
         state.handPoint = {
-          x: (1 - tip.x) * canvas.width,
+          x: tip.x * canvas.width,
           y: tip.y * canvas.height
         };
         addTrailPoint(state.handPoint.x, state.handPoint.y);
-
-        // update spotlight position and show it
-        spotlight.style.display = 'block';
-        spotlight.style.setProperty('--x', `${state.handPoint.x}px`);
-        spotlight.style.setProperty('--y', `${state.handPoint.y}px`);
       } else {
         state.handPoint = null;
-        spotlight.style.display = 'none';
+      }
+    }
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`Failed to load ${src}`));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function setupTfFallback() {
+      try {
+        if (typeof window.tf === 'undefined') {
+          await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js');
+        }
+        if (typeof window.handpose === 'undefined') {
+          await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.0.7/dist/handpose.min.js');
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' }
+        });
+        webcam.srcObject = stream;
+        state.webcamStream = stream;
+        webcam.style.display = 'block';
+        await webcam.play();
+
+        state.handposeModel = await window.handpose.load();
+        state.useCamera = true;
+
+        async function detectLoop() {
+          if (!state.useCamera || !state.handposeModel) return;
+          try {
+            const predictions = await state.handposeModel.estimateHands(webcam, true);
+            if (predictions && predictions.length > 0 && predictions[0].landmarks) {
+              const tip = predictions[0].landmarks[8];
+              state.handPoint = {
+                x: tip[0],
+                y: tip[1]
+              };
+              addTrailPoint(state.handPoint.x, state.handPoint.y);
+            } else {
+              state.handPoint = null;
+            }
+          } catch (err) {
+            console.warn('Hand tracking detect loop failed:', err);
+            state.handPoint = null;
+          }
+          if (state.useCamera) requestAnimationFrame(detectLoop);
+        }
+
+        requestAnimationFrame(detectLoop);
+        return true;
+      } catch (err) {
+        console.warn('TF handpose fallback failed:', err);
+        if (state.webcamStream) {
+          state.webcamStream.getTracks().forEach(track => track.stop());
+        }
+        webcam.style.display = 'none';
+        return false;
       }
     }
 
     async function setupCameraTracking() {
-      // ensure MediaPipe libraries are available
       const hasHands = typeof window.Hands !== "undefined" && typeof window.Camera !== "undefined";
-      if (!hasHands) {
-        return false;
+      if (hasHands) {
+        webcam.style.display = "block";
+        try {
+          const hands = new window.Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+          });
+
+          hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+          });
+
+          hands.onResults(onHandResults);
+          state.handsInstance = hands;
+
+          const camera = new window.Camera(webcam, {
+            onFrame: async () => {
+              await hands.send({ image: webcam });
+            },
+            width: Math.min(window.innerWidth, 1280),
+            height: Math.min(window.innerHeight, 720),
+            facingMode: "user"
+          });
+
+          state.cameraInstance = camera;
+          state.useCamera = true;
+          await camera.start();
+          return true;
+        } catch (err) {
+          console.warn('MediaPipe start failed:', err);
+        }
       }
 
-      webcam.style.display = "block";
-
-      try {
-        // create a new Hands instance and store it on state so we can reuse/stop later if needed
-        const hands = new window.Hands({
-          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-        });
-
-        hands.setOptions({
-          maxNumHands: 1,
-          modelComplexity: 1,
-          minDetectionConfidence: 0.7,
-          minTrackingConfidence: 0.7
-        });
-
-        hands.onResults(onHandResults);
-        state.handsInstance = hands;
-
-        const camera = new window.Camera(webcam, {
-          onFrame: async () => {
-            await hands.send({ image: webcam });
-          },
-          width: Math.min(window.innerWidth, 1280),
-          height: Math.min(window.innerHeight, 720),
-          facingMode: "user"
-        });
-
-        state.cameraInstance = camera;
-        await camera.start();
-        return true;
-      } catch (err) {
-        // if user denies permission or other errors, hide webcam and clean up
-        webcam.style.display = "none";
-        console.warn('Camera start failed', err);
-        return false;
-      }
+      return await setupTfFallback();
     }
 
-    // --- difficulty and HUD initialization ---
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (const fruit of state.fruits) drawFruit(fruit);
+      for (const slice of state.slices) drawFruitSlice(slice);
+      drawParticles();
+      drawTrail();
+      drawCursor();
+    }
+
     updateHud();
     draw();
   </script>

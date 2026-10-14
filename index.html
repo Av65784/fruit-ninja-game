@@ -33,12 +33,33 @@
       text-shadow: 0 2px 8px rgba(0,0,0,0.5);
     }
 
+    #hud .small {
+      display: inline-block;
+      font-size: 14px;
+      font-weight: 600;
+      margin-left: 12px;
+      opacity: 0.9;
+    }
+
     #score {
       color: #ffd166;
     }
 
     #misses {
       color: #ff6b6b;
+    }
+
+    #streak {
+      color: #8ad4ff;
+      margin-left: 10px;
+    }
+
+    #difficulty {
+      color: #ffd1a9;
+      margin-left: 10px;
+      text-transform: uppercase;
+      font-size: 14px;
+      font-weight: 800;
     }
 
     #overlay {
@@ -98,6 +119,12 @@
       z-index: 15;
     }
 
+    #camBtn {
+      margin-left: 12px;
+      background: linear-gradient(135deg, #00b894, #009977);
+      box-shadow: 0 12px 24px rgba(0,185,148,0.15);
+    }
+
     @media (max-width: 640px) {
       #hud { font-size: 20px; }
       #webcam { width: 140px; height: 94px; }
@@ -108,6 +135,8 @@
   <div id="hud">
     Score: <span id="score">0</span> &nbsp;|&nbsp;
     Misses: <span id="misses">0</span>/3
+    <span class="small">Streak: <span id="streak">0</span></span>
+    <span id="difficulty">EASY</span>
   </div>
 
   <canvas id="game"></canvas>
@@ -117,7 +146,10 @@
     <div class="panel">
       <h1>Fruit Ninja</h1>
       <p>Slice fruits to gain points. Miss 3 and the game ends.</p>
-      <button id="startBtn">Start Game</button>
+      <div style="display:flex;gap:12px;align-items:center;justify-content:center;">
+        <button id="startBtn">Start Game</button>
+        <button id="camBtn">Enable Camera</button>
+      </div>
     </div>
   </div>
 
@@ -129,7 +161,10 @@
     const missesEl = document.getElementById("misses");
     const overlay = document.getElementById("overlay");
     const startBtn = document.getElementById("startBtn");
+    const camBtn = document.getElementById("camBtn");
     const webcam = document.getElementById("webcam");
+    const streakEl = document.getElementById("streak");
+    const difficultyEl = document.getElementById("difficulty");
 
     const state = {
       score: 0,
@@ -143,7 +178,11 @@
       trail: [],
       handPoint: null,
       lastTime: 0,
-      spawnTimer: 0
+      spawnTimer: 0,
+      streak: 0,
+      difficulty: 'easy',
+      handsInstance: null,
+      cameraInstance: null
     };
 
     const fruitPalette = [
@@ -154,6 +193,12 @@
       { name: "kiwi", color: "#7ae582", radius: 24 },
       { name: "banana", color: "#f7d154", radius: 20 }
     ];
+
+    const difficultySettings = {
+      easy: { spawnMin: 34, spawnMax: 52, speedMult: 1 },
+      medium: { spawnMin: 24, spawnMax: 40, speedMult: 1.25 },
+      hard: { spawnMin: 14, spawnMax: 30, speedMult: 1.6 }
+    };
 
     function resizeCanvas() {
       canvas.width = window.innerWidth;
@@ -167,6 +212,8 @@
     function updateHud() {
       scoreEl.textContent = state.score;
       missesEl.textContent = `${state.misses}/3`;
+      streakEl.textContent = state.streak;
+      difficultyEl.textContent = state.difficulty.toUpperCase();
     }
 
     function addTrailPoint(x, y) {
@@ -187,11 +234,14 @@
       const x = rand(offset, canvas.width - offset);
       const y = canvas.height + 30;
 
+      const settings = difficultySettings[state.difficulty] || difficultySettings.easy;
+      const speedMult = settings.speedMult;
+
       state.fruits.push({
         x,
         y,
-        vx: rand(-4.5, 4.5),
-        vy: -rand(7, 11),
+        vx: rand(-4.5, 4.5) * speedMult,
+        vy: -rand(7, 11) * speedMult,
         radius: def.radius,
         color: def.color,
         name: def.name,
@@ -200,6 +250,9 @@
         sliced: false,
         missed: false
       });
+
+      // set next spawn using difficulty settings
+      state.spawnTimer = rand(settings.spawnMin, settings.spawnMax);
     }
 
     function createParticles(x, y, color) {
@@ -238,11 +291,31 @@
       }
     }
 
+    function checkDifficulty() {
+      const prev = state.difficulty;
+      if (state.streak >= 30) state.difficulty = 'hard';
+      else if (state.streak >= 15) state.difficulty = 'medium';
+      else state.difficulty = 'easy';
+
+      if (prev !== state.difficulty) {
+        // small visual cue: briefly flash the difficulty text
+        difficultyEl.textContent = state.difficulty.toUpperCase();
+        difficultyEl.style.transition = 'transform 0.25s ease';
+        difficultyEl.style.transform = 'scale(1.18)';
+        setTimeout(() => {
+          difficultyEl.style.transform = '';
+        }, 220);
+      }
+      updateHud();
+    }
+
     function sliceFruit(fruit) {
       if (fruit.sliced) return;
       fruit.sliced = true;
       state.score += 10;
+      state.streak += 1;
       updateHud();
+      checkDifficulty();
 
       createParticles(fruit.x, fruit.y, fruit.color);
       createSlicePieces(fruit);
@@ -277,6 +350,8 @@
       state.trail = [];
       state.lastTime = 0;
       state.spawnTimer = 0;
+      state.streak = 0;
+      state.difficulty = 'easy';
       overlay.style.display = "none";
       updateHud();
       requestAnimationFrame(gameLoop);
@@ -292,7 +367,10 @@
 
         if (fruit.y - fruit.radius > canvas.height) {
           state.misses += 1;
-          state.score -= 1;
+          state.score = Math.max(0, state.score - 1);
+          // reset streak when missing
+          state.streak = 0;
+          checkDifficulty();
           updateHud();
 
           state.fruits.splice(i, 1);
@@ -449,17 +527,6 @@
       ctx.stroke();
     }
 
-    function draw() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      for (const fruit of state.fruits) drawFruit(fruit);
-      for (const slice of state.slices) drawFruitSlice(slice);
-      drawParticles();
-
-      drawTrail();
-      drawCursor();
-    }
-
     function gameLoop(ts) {
       if (!state.running) return;
 
@@ -469,7 +536,6 @@
       state.spawnTimer -= delta;
       if (state.spawnTimer <= 0) {
         spawnFruit();
-        state.spawnTimer = rand(34, 52);
       }
 
       updateFruits(delta);
@@ -503,9 +569,25 @@
       state.trail = [];
       state.lastTime = 0;
       state.spawnTimer = 0;
+      state.streak = 0;
+      state.difficulty = 'easy';
       updateHud();
       overlay.style.display = "none";
       requestAnimationFrame(gameLoop);
+    });
+
+    camBtn.addEventListener('click', async () => {
+      camBtn.disabled = true;
+      camBtn.textContent = 'Enabling...';
+      const ok = await setupCameraTracking();
+      if (!ok) {
+        camBtn.disabled = false;
+        camBtn.textContent = 'Enable Camera';
+        alert('Camera / Hands not available in this browser. Make sure you allow camera permissions and try a supported browser.');
+        return;
+      }
+      camBtn.textContent = 'Camera On';
+      camBtn.style.opacity = '0.85';
     });
 
     function onHandResults(results) {
@@ -521,7 +603,8 @@
       }
     }
 
-    function setupCameraTracking() {
+    async function setupCameraTracking() {
+      // ensure MediaPipe libraries are available
       const hasHands = typeof window.Hands !== "undefined" && typeof window.Camera !== "undefined";
       if (!hasHands) {
         return false;
@@ -529,36 +612,43 @@
 
       webcam.style.display = "block";
 
-      const hands = new window.Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-      });
+      try {
+        // create a new Hands instance and store it on state so we can reuse/stop later if needed
+        const hands = new window.Hands({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
 
-      hands.setOptions({
-        maxNumHands: 1,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.7,
-        minTrackingConfidence: 0.7
-      });
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.7,
+          minTrackingConfidence: 0.7
+        });
 
-      hands.onResults(onHandResults);
+        hands.onResults(onHandResults);
+        state.handsInstance = hands;
 
-      const camera = new window.Camera(webcam, {
-        onFrame: async () => {
-          await hands.send({ image: webcam });
-        },
-        width: Math.min(window.innerWidth, 1280),
-        height: Math.min(window.innerHeight, 720),
-        facingMode: "user"
-      });
+        const camera = new window.Camera(webcam, {
+          onFrame: async () => {
+            await hands.send({ image: webcam });
+          },
+          width: Math.min(window.innerWidth, 1280),
+          height: Math.min(window.innerHeight, 720),
+          facingMode: "user"
+        });
 
-      camera.start().catch(() => {
+        state.cameraInstance = camera;
+        await camera.start();
+        return true;
+      } catch (err) {
+        // if user denies permission or other errors, hide webcam and clean up
         webcam.style.display = "none";
-      });
-
-      return true;
+        console.warn('Camera start failed', err);
+        return false;
+      }
     }
 
-    setupCameraTracking();
+    // --- difficulty and HUD initialization ---
     updateHud();
     draw();
   </script>
